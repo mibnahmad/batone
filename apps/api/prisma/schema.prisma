@@ -1,0 +1,526 @@
+// BatiOne Construction — data model.
+//
+// Design rule enforced structurally here: every AI-derived value carries
+// `confidence` + `sourceRefs`, and every user override appends to
+// `correctionHistory` instead of overwriting.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/* ------------------------------------------------------------------ */
+/* Platform layer                                                      */
+/* ------------------------------------------------------------------ */
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users        User[]
+  projects     Project[]
+  subscription Subscription?
+  ruleSets     RuleSet[]
+  auditEvents  AuditEvent[]
+}
+
+model User {
+  id             String   @id @default(cuid())
+  organizationId String
+  email          String   @unique
+  passwordHash   String?
+  fullName       String
+  role           String   @default("engineer")
+  provider       String   @default("password") // password | google | microsoft
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  projects     Project[]
+  chatMessages ChatMessage[]
+
+  @@index([organizationId])
+}
+
+model Subscription {
+  id             String   @id @default(cuid())
+  organizationId String   @unique
+  planName       String   @default("standard")
+  status         String   @default("active")
+  periodStart    DateTime @default(now())
+  periodEnd      DateTime
+  stripeCustomer String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  entitlements ServiceEntitlement[]
+}
+
+/// Per-service entitlement. A customer may buy 1..4 services independently;
+/// exhausting one must never block the others.
+model ServiceEntitlement {
+  id             String   @id @default(cuid())
+  subscriptionId String
+  service        String // takeoff | model3d | rebar | price_study
+  quotaTotal     Int      @default(0)
+  quotaUsed      Int      @default(0)
+  status         String   @default("active") // active | exhausted | inactive
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  subscription Subscription     @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  consumptions QuotaConsumption[]
+
+  @@unique([subscriptionId, service])
+}
+
+/// Append-only ledger of quota consumption, so usage is auditable and refundable.
+model QuotaConsumption {
+  id            String   @id @default(cuid())
+  entitlementId String
+  projectId     String?
+  jobId         String?
+  amount        Int      @default(1)
+  reason        String
+  createdAt     DateTime @default(now())
+
+  entitlement ServiceEntitlement @relation(fields: [entitlementId], references: [id], onDelete: Cascade)
+
+  @@index([entitlementId])
+}
+
+model Project {
+  id             String   @id @default(cuid())
+  organizationId String
+  createdById    String
+  name           String
+  reference      String?
+  client         String?
+  location       String?
+  description    String?
+  /// Services enabled on this project.
+  services       String[]
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy      User              @relation(fields: [createdById], references: [id])
+  documents      ProjectDocument[]
+  versions       ProjectVersion[]
+  chatSessions   ChatSession[]
+  jobs           Job[]
+  takeoffLines   TakeoffLine[]
+  cctpClauses    CctpClause[]
+  models3d       Model3D[]
+  structural     StructuralElement[]
+  priceStudies   PriceStudy[]
+  clarifications Clarification[]
+  exports        ExportArtifact[]
+
+  @@index([organizationId])
+}
+
+model ProjectDocument {
+  id           String   @id @default(cuid())
+  projectId    String
+  kind         String // plan | cctp | coupe | quantities | other
+  format       String // pdf | dwg | dxf | jpg | png | xlsx | csv
+  originalName String
+  storageKey   String
+  sizeBytes    Int
+  floor        String?
+  label        String?
+  orderIndex   Int      @default(0)
+  /// Result of the document-processing pipeline: pages, text spans, vector entities.
+  parsed       Json?
+  parseStatus  String   @default("pending") // pending | parsing | parsed | failed
+  parseError   String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  project Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  clauses CctpClause[]
+
+  @@index([projectId])
+}
+
+/// Immutable snapshot used for restore / audit across all services.
+model ProjectVersion {
+  id        String   @id @default(cuid())
+  projectId String
+  service   String
+  label     String
+  snapshot  Json
+  createdBy String
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, service])
+}
+
+model AuditEvent {
+  id             String   @id @default(cuid())
+  organizationId String
+  projectId      String?
+  actorId        String?
+  actorType      String   @default("user") // user | ai | system
+  service        String?
+  action         String
+  entityType     String?
+  entityId       String?
+  payload        Json?
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, createdAt])
+  @@index([projectId])
+}
+
+/* ------------------------------------------------------------------ */
+/* Async jobs                                                          */
+/* ------------------------------------------------------------------ */
+
+model Job {
+  id        String    @id @default(cuid())
+  projectId String
+  service   String
+  type      String
+  status    String    @default("queued")
+  step      String    @default("import")
+  progress  Int       @default(0)
+  message   String?
+  error     String?
+  input     Json?
+  result    Json?
+  startedAt DateTime?
+  endedAt   DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, service])
+}
+
+/* ------------------------------------------------------------------ */
+/* AI Gateway: chat + clarification engine                             */
+/* ------------------------------------------------------------------ */
+
+model ChatSession {
+  id        String   @id @default(cuid())
+  projectId String
+  service   String
+  title     String   @default("Assistant")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project  Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  messages ChatMessage[]
+
+  @@unique([projectId, service])
+}
+
+model ChatMessage {
+  id        String   @id @default(cuid())
+  sessionId String
+  userId    String?
+  role      String // user | assistant | system
+  content   String
+  /// References to entities the message is about (element ids, takeoff line ids...).
+  entityRefs Json?
+  /// A pending edit proposal or clarification attached to this message.
+  proposal  Json?
+  createdAt DateTime @default(now())
+
+  session ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user    User?       @relation(fields: [userId], references: [id])
+
+  @@index([sessionId, createdAt])
+}
+
+/// A value the AI refused to invent. Blocks finalization of `targetPath`
+/// until answered or explicitly dismissed.
+model Clarification {
+  id         String   @id @default(cuid())
+  projectId  String
+  service    String
+  kind       String // missing_data | contradiction | low_confidence | ambiguous_instruction
+  targetPath String
+  question   String
+  options    String[]
+  sourceRefs Json     @default("[]")
+  status     String   @default("open")
+  answer     String?
+  answeredBy String?
+  answeredAt DateTime?
+  createdAt  DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, service, status])
+}
+
+/* ------------------------------------------------------------------ */
+/* Deterministic rule engine (services 1, 3, 4) — BatiOne owned        */
+/* ------------------------------------------------------------------ */
+
+/// Versioned rule sets. Calculations NEVER come from the LLM; they come from here.
+model RuleSet {
+  id             String   @id @default(cuid())
+  organizationId String? // null = BatiOne global default
+  domain         String // rebar | price | takeoff
+  key            String
+  version        String
+  label          String
+  definition     Json
+  isDefault      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([domain, key, version, organizationId])
+  @@index([domain, isDefault])
+}
+
+/* ------------------------------------------------------------------ */
+/* Service 1 — Métré automatisé                                        */
+/* ------------------------------------------------------------------ */
+
+model CctpClause {
+  id            String   @id @default(cuid())
+  projectId     String
+  documentId    String
+  reference     String
+  title         String   @default("")
+  text          String
+  extractedRule String?
+  category      String   @default("divers")
+  page          Int?
+  /// Embedding used for semantic clause retrieval (cosine, computed in-process).
+  embedding     Float[]
+  createdAt     DateTime @default(now())
+
+  project  Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  document ProjectDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+}
+
+model TakeoffLine {
+  id          String   @id @default(cuid())
+  projectId   String
+  ouvrage     String
+  description String   @default("")
+  category    String   @default("divers")
+  unit        String
+  floor       String   @default("RDC")
+  quantity    Float?
+  /// Traced dimensions the quantity was computed from.
+  dimensions  Json     @default("[]")
+  confidence  String
+  score       Float?
+  sourceRefs  Json     @default("[]")
+  clauseIds   String[]
+  /// True while a Clarification blocks this line from being finalized.
+  blocked     Boolean  @default(false)
+  /// Append-only. User overrides are added here, never applied destructively.
+  correctionHistory Json @default("[]")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, floor])
+}
+
+/* ------------------------------------------------------------------ */
+/* Service 2 — 2D → 3D                                                 */
+/* ------------------------------------------------------------------ */
+
+model Model3D {
+  id        String   @id @default(cuid())
+  projectId String
+  version   Int      @default(1)
+  floors    String[]
+  status    String   @default("draft")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project  Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  elements Element3D[]
+  edits    EditHistory[]
+
+  @@index([projectId])
+}
+
+model Element3D {
+  id         String   @id @default(cuid())
+  modelId    String
+  externalId String
+  type       String
+  name       String   @default("")
+  floor      String   @default("RDC")
+  geometry   Json
+  material   String   @default("beton")
+  attributes Json     @default("{}")
+  visible    Boolean  @default(true)
+  confidence String
+  sourceRefs Json     @default("[]")
+  correctionHistory Json @default("[]")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  model Model3D @relation(fields: [modelId], references: [id], onDelete: Cascade)
+
+  @@unique([modelId, externalId])
+  @@index([modelId, floor])
+}
+
+/// Linear edit log supporting undo/redo and version restore.
+model EditHistory {
+  id                 String   @id @default(cuid())
+  modelId            String
+  sequence           Int
+  instructionNl      String?
+  resolvedOperations Json
+  inverseOperations  Json
+  summary            String
+  appliedBy          String // ai | user
+  actorId            String?
+  undone             Boolean  @default(false)
+  createdAt          DateTime @default(now())
+
+  model Model3D @relation(fields: [modelId], references: [id], onDelete: Cascade)
+
+  @@unique([modelId, sequence])
+  @@index([modelId])
+}
+
+/* ------------------------------------------------------------------ */
+/* Service 3 — Métré ferraillage                                       */
+/* ------------------------------------------------------------------ */
+
+model StructuralElement {
+  id         String   @id @default(cuid())
+  projectId  String
+  reference  String
+  type       String
+  floor      String   @default("Fondations")
+  count      Int      @default(1)
+  /// Traced dimensions read from the coupes.
+  dimensions Json     @default("{}")
+  callouts   Json     @default("[]")
+  confidence String
+  sourceRefs Json     @default("[]")
+  blocked    Boolean  @default(false)
+  correctionHistory Json @default("[]")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  project    Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  rebarLines RebarLine[]
+
+  @@unique([projectId, reference])
+  @@index([projectId, type])
+}
+
+model RebarLine {
+  id                  String   @id @default(cuid())
+  structuralElementId String
+  role                String
+  diameterMm          Float
+  unitLengthM         Float
+  count               Int
+  totalLengthM        Float
+  unitMassKgPerM      Float
+  totalWeightKg       Float
+  ruleId              String
+  ruleVersion         String
+  computation         String
+  confidence          String
+  sourceRefs          Json     @default("[]")
+  createdAt           DateTime @default(now())
+
+  element StructuralElement @relation(fields: [structuralElementId], references: [id], onDelete: Cascade)
+
+  @@index([structuralElementId])
+}
+
+/* ------------------------------------------------------------------ */
+/* Service 4 — Étude de prix                                           */
+/* ------------------------------------------------------------------ */
+
+model PriceStudy {
+  id            String   @id @default(cuid())
+  projectId     String
+  name          String   @default("Étude de prix")
+  currency      String   @default("EUR")
+  ruleSetId     String?
+  /// Computed breakdown (deterministic engine output), recomputed on every change.
+  breakdown     Json?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  project Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  items   PriceItem[]
+
+  @@index([projectId])
+}
+
+model PriceItem {
+  id                  String   @id @default(cuid())
+  studyId             String
+  code                String   @default("")
+  designation         String
+  category            String   @default("divers")
+  unit                String
+  quantity            Float    @default(0)
+  unitPriceMaterials  Float    @default(0)
+  unitPriceLabour     Float    @default(0)
+  unitPriceEquipment  Float    @default(0)
+  /// Engine-computed, never user-written.
+  totalMaterials      Float    @default(0)
+  totalLabour         Float    @default(0)
+  totalEquipment      Float    @default(0)
+  total               Float    @default(0)
+  confidence          String   @default("user_confirmed")
+  sourceRefs          Json     @default("[]")
+  correctionHistory   Json     @default("[]")
+  orderIndex          Int      @default(0)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  study PriceStudy @relation(fields: [studyId], references: [id], onDelete: Cascade)
+
+  @@index([studyId])
+}
+
+/* ------------------------------------------------------------------ */
+/* Exports                                                             */
+/* ------------------------------------------------------------------ */
+
+model ExportArtifact {
+  id         String   @id @default(cuid())
+  projectId  String
+  service    String
+  format     String
+  storageKey String
+  filename   String
+  sizeBytes  Int      @default(0)
+  createdBy  String
+  createdAt  DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, service])
+}

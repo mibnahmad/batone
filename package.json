@@ -1,0 +1,30 @@
+{
+  "name": "batione",
+  "private": true,
+  "version": "0.1.0",
+  "description": "BatiOne Construction — AI-assisted SaaS for construction professionals",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @batione/shared && npm run build -w @batione/api && npm run build -w @batione/web",
+    "dev": "concurrently -n api,web -c blue,magenta \"npm run dev -w @batione/api\" \"npm run dev -w @batione/web\"",
+    "infra:up": "docker compose -f infra/docker-compose.yml up -d",
+    "infra:down": "docker compose -f infra/docker-compose.yml down",
+    "infra:reset": "docker compose -f infra/docker-compose.yml down -v",
+    "db:generate": "npm run db:generate -w @batione/api",
+    "db:push": "npm run db:push -w @batione/api",
+    "db:seed": "npm run db:seed -w @batione/api",
+    "bootstrap": "npm run infra:up && npm run build -w @batione/shared && npm run db:push && npm run db:seed",
+    "test": "npm run test -w @batione/api",
+    "lint": "npm run lint -w @batione/api && npm run lint -w @batione/web"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
