@@ -22,13 +22,8 @@ export function Logo({ variant = 'dark', size = 'md', className }: LogoProps) {
   const dark = variant === 'dark';
   return (
     <span className={cn('inline-flex items-center gap-2', className)}>
-      <span
-        className={cn(
-          'inline-flex items-center justify-center rounded-lg bg-brand-500 font-black text-ink-950',
-          MARK_SIZE[size],
-        )}
-      >
-        B1
+      <span className={cn('inline-flex items-center justify-center', MARK_SIZE[size])}>
+        <img src="/logo.png" alt="" className="h-full w-full object-contain" />
       </span>
       <span
         className={cn(
