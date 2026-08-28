@@ -23,7 +23,7 @@ import type {
   ExportArtifact,
 } from './types';
 
-export const API_BASE = '/api';
+export const API_BASE = import.meta.env.VITE_API_URL ?? '/api';
 
 export class ApiError extends Error {
   status: number;
